@@ -6,7 +6,9 @@ import {
   validateVersion,
   getPyPyVersionFromPath,
   readExactPyPyVersionFile,
-  validatePythonVersionFormatForPyPy
+  validatePythonVersionFormatForPyPy,
+  IPyPyManifestRelease,
+  getBinaryDirectory
 } from './utils';
 
 import * as semver from 'semver';
@@ -20,13 +22,42 @@ interface IPyPyVersionSpec {
 
 export async function findPyPyVersion(
   versionSpec: string,
-  architecture: string
+  architecture: string,
+  updateEnvironment: boolean,
+  checkLatest: boolean,
+  allowPreReleases: boolean
 ): Promise<{resolvedPyPyVersion: string; resolvedPythonVersion: string}> {
   let resolvedPyPyVersion = '';
   let resolvedPythonVersion = '';
   let installDir: string | null;
+  let releases: IPyPyManifestRelease[] | undefined;
 
   const pypyVersionSpec = parsePyPyVersion(versionSpec);
+
+  if (checkLatest) {
+    releases = await pypyInstall.getAvailablePyPyVersions();
+    if (releases && releases.length > 0) {
+      const releaseData = pypyInstall.findRelease(
+        releases,
+        pypyVersionSpec.pythonVersion,
+        pypyVersionSpec.pypyVersion,
+        architecture,
+        false
+      );
+
+      if (releaseData) {
+        core.info(
+          `Resolved as PyPy ${releaseData.resolvedPyPyVersion} with Python (${releaseData.resolvedPythonVersion})`
+        );
+        pypyVersionSpec.pythonVersion = releaseData.resolvedPythonVersion;
+        pypyVersionSpec.pypyVersion = releaseData.resolvedPyPyVersion;
+      } else {
+        core.info(
+          `Failed to resolve PyPy ${pypyVersionSpec.pypyVersion} with Python (${pypyVersionSpec.pythonVersion}) from manifest`
+        );
+      }
+    }
+  }
 
   ({installDir, resolvedPythonVersion, resolvedPyPyVersion} = findPyPyToolCache(
     pypyVersionSpec.pythonVersion,
@@ -35,15 +66,14 @@ export async function findPyPyVersion(
   ));
 
   if (!installDir) {
-    ({
-      installDir,
-      resolvedPythonVersion,
-      resolvedPyPyVersion
-    } = await pypyInstall.installPyPy(
-      pypyVersionSpec.pypyVersion,
-      pypyVersionSpec.pythonVersion,
-      architecture
-    ));
+    ({installDir, resolvedPythonVersion, resolvedPyPyVersion} =
+      await pypyInstall.installPyPy(
+        pypyVersionSpec.pypyVersion,
+        pypyVersionSpec.pythonVersion,
+        architecture,
+        allowPreReleases,
+        releases
+      ));
   }
 
   const pipDir = IS_WINDOWS ? 'Scripts' : 'bin';
@@ -53,12 +83,20 @@ export async function findPyPyVersion(
     IS_WINDOWS ? installDir : _binDir,
     `python${binaryExtension}`
   );
-  const pythonLocation = pypyInstall.getPyPyBinaryPath(installDir);
-  core.exportVariable('pythonLocation', installDir);
-  core.exportVariable('PKG_CONFIG_PATH', pythonLocation + '/lib/pkgconfig');
-  core.addPath(pythonLocation);
-  core.addPath(_binDir);
-  core.setOutput('python-version', 'pypy' + resolvedPyPyVersion.trim());
+  const pythonLocation = getBinaryDirectory(installDir);
+  if (updateEnvironment) {
+    core.exportVariable('pythonLocation', installDir);
+    // https://cmake.org/cmake/help/latest/module/FindPython.html#module:FindPython
+    core.exportVariable('Python_ROOT_DIR', installDir);
+    // https://cmake.org/cmake/help/latest/module/FindPython2.html#module:FindPython2
+    core.exportVariable('Python2_ROOT_DIR', installDir);
+    // https://cmake.org/cmake/help/latest/module/FindPython3.html#module:FindPython3
+    core.exportVariable('Python3_ROOT_DIR', installDir);
+    core.exportVariable('PKG_CONFIG_PATH', pythonLocation + '/lib/pkgconfig');
+    core.addPath(pythonLocation);
+    core.addPath(_binDir);
+  }
+  core.setOutput('python-version', 'pypy' + resolvedPyPyVersion);
   core.setOutput('python-path', pythonPath);
 
   return {resolvedPyPyVersion, resolvedPythonVersion};
@@ -105,7 +143,7 @@ export function parsePyPyVersion(versionSpec: string): IPyPyVersionSpec {
   const versions = versionSpec.split('-').filter(item => !!item);
 
   if (/^(pypy)(.+)/.test(versions[0])) {
-    let pythonVersion = versions[0].replace('pypy', '');
+    const pythonVersion = versions[0].replace('pypy', '');
     versions.splice(0, 1, 'pypy', pythonVersion);
   }
 

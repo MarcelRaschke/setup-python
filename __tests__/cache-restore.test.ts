@@ -1,17 +1,20 @@
+import * as path from 'path';
 import * as core from '@actions/core';
 import * as cache from '@actions/cache';
 import * as exec from '@actions/exec';
+import * as io from '@actions/io';
 import {getCacheDistributor} from '../src/cache-distributions/cache-factory';
+import {State} from '../src/cache-distributions/cache-distributor';
 
 describe('restore-cache', () => {
   const pipFileLockHash =
-    'd1dd6218299d8a6db5fc2001d988b34a8b31f1e9d0bb4534d377dde7c19f64b3';
+    'f8428d7cf00ea53a5c3702f0a9cb3cc467f76cd86a34723009350c4e4b32751a';
   const requirementsHash =
     'd8110e0006d7fb5ee76365d565eef9d37df1d11598b912d3eb66d398d57a1121';
   const requirementsLinuxHash =
     '2d0ff7f46b0e120e3d3294db65768b474934242637b9899b873e6283dfd16d7c';
   const poetryLockHash =
-    '571bf984f8d210e6a97f854e479fdd4a2b5af67b5fdac109ec337a0ea16e7836';
+    'f24ea1ad73968e6c8d80c16a093ade72d9332c433aeef979a0dd943e6a99b2ab';
   const poetryConfigOutput = `
 cache-dir = "/Users/patrick/Library/Caches/pypoetry"
 experimental.new-installer = false
@@ -25,7 +28,7 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
   let infoSpy: jest.SpyInstance;
   let warningSpy: jest.SpyInstance;
   let debugSpy: jest.SpyInstance;
-  let saveSatetSpy: jest.SpyInstance;
+  let saveStateSpy: jest.SpyInstance;
   let getStateSpy: jest.SpyInstance;
   let setOutputSpy: jest.SpyInstance;
 
@@ -34,6 +37,9 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
 
   // exec spy
   let getExecOutputSpy: jest.SpyInstance;
+
+  // io spy
+  let whichSpy: jest.SpyInstance;
 
   beforeEach(() => {
     process.env['RUNNER_OS'] = process.env['RUNNER_OS'] ?? 'linux';
@@ -47,8 +53,8 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
     debugSpy = jest.spyOn(core, 'debug');
     debugSpy.mockImplementation(input => undefined);
 
-    saveSatetSpy = jest.spyOn(core, 'saveState');
-    saveSatetSpy.mockImplementation(input => undefined);
+    saveStateSpy = jest.spyOn(core, 'saveState');
+    saveStateSpy.mockImplementation(input => undefined);
 
     getStateSpy = jest.spyOn(core, 'getState');
     getStateSpy.mockImplementation(input => undefined);
@@ -60,6 +66,9 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
       }
       if (input.includes('poetry')) {
         return {stdout: poetryConfigOutput, stderr: '', exitCode: 0};
+      }
+      if (input.includes('lsb_release')) {
+        return {stdout: 'Ubuntu\n20.04', stderr: '', exitCode: 0};
       }
 
       return {stdout: '', stderr: 'Error occured', exitCode: 2};
@@ -74,6 +83,9 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
         return primaryKey;
       }
     );
+
+    whichSpy = jest.spyOn(io, 'which');
+    whichSpy.mockImplementation(() => '/path/to/python');
   });
 
   describe('Validate provided package manager', () => {
@@ -82,47 +94,126 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
       async packageManager => {
         expect(() =>
           getCacheDistributor(packageManager, '3.8.12', undefined)
-        ).toThrowError(`Caching for '${packageManager}' is not supported`);
+        ).toThrow(`Caching for '${packageManager}' is not supported`);
       }
     );
   });
 
   describe('Restore dependencies', () => {
     it.each([
-      ['pip', '3.8.12', undefined, requirementsHash],
-      ['pip', '3.8.12', '**/requirements-linux.txt', requirementsLinuxHash],
+      [
+        'pip',
+        '3.8.12',
+        '__tests__/data/**/requirements.txt',
+        requirementsHash,
+        undefined
+      ],
+      [
+        'pip',
+        '3.8.12',
+        '__tests__/data/**/requirements-linux.txt',
+        requirementsLinuxHash,
+        undefined
+      ],
       [
         'pip',
         '3.8.12',
         '__tests__/data/requirements-linux.txt',
-        requirementsLinuxHash
+        requirementsLinuxHash,
+        undefined
       ],
-      ['pip', '3.8.12', '__tests__/data/requirements.txt', requirementsHash],
-      ['pipenv', '3.9.1', undefined, pipFileLockHash],
-      ['pipenv', '3.9.12', '__tests__/data/requirements.txt', requirementsHash],
-      ['poetry', '3.9.1', undefined, poetryLockHash]
+      [
+        'pip',
+        '3.8.12',
+        '__tests__/data/requirements.txt',
+        requirementsHash,
+        undefined
+      ],
+      [
+        'pipenv',
+        '3.9.1',
+        '__tests__/data/**/Pipfile.lock',
+        pipFileLockHash,
+        undefined
+      ],
+      [
+        'pipenv',
+        '3.9.12',
+        '__tests__/data/requirements.txt',
+        requirementsHash,
+        undefined
+      ],
+      [
+        'poetry',
+        '3.9.1',
+        '__tests__/data/**/poetry.lock',
+        poetryLockHash,
+        [
+          '/Users/patrick/Library/Caches/pypoetry/virtualenvs',
+          path.join(__dirname, 'data', 'inner', '.venv'),
+          path.join(__dirname, 'data', '.venv')
+        ]
+      ]
     ])(
       'restored dependencies for %s by primaryKey',
-      async (packageManager, pythonVersion, dependencyFile, fileHash) => {
+      async (
+        packageManager,
+        pythonVersion,
+        dependencyFile,
+        fileHash,
+        cachePaths
+      ) => {
+        restoreCacheSpy.mockImplementation(
+          (cachePaths: string[], primaryKey: string, restoreKey?: string) => {
+            return primaryKey.includes(fileHash) ? primaryKey : '';
+          }
+        );
+
         const cacheDistributor = getCacheDistributor(
           packageManager,
           pythonVersion,
           dependencyFile
         );
+
         await cacheDistributor.restoreCache();
 
-        expect(infoSpy).toHaveBeenCalledWith(
-          `Cache restored from key: setup-python-${process.env['RUNNER_OS']}-python-${pythonVersion}-${packageManager}-${fileHash}`
+        if (cachePaths !== undefined) {
+          expect(saveStateSpy).toHaveBeenCalledWith(
+            State.CACHE_PATHS,
+            cachePaths
+          );
+        }
+
+        const restoredKeys = restoreCacheSpy.mock.results.map(
+          result => result.value
         );
+
+        restoredKeys.forEach(restoredKey => {
+          if (restoredKey) {
+            if (process.platform === 'linux' && packageManager === 'pip') {
+              expect(infoSpy).toHaveBeenCalledWith(
+                `Cache restored from key: setup-python-${process.env['RUNNER_OS']}-${process.arch}-20.04-Ubuntu-python-${pythonVersion}-${packageManager}-${fileHash}`
+              );
+            } else if (packageManager === 'poetry') {
+              expect(infoSpy).toHaveBeenCalledWith(
+                `Cache restored from key: setup-python-${process.env['RUNNER_OS']}-${process.arch}-python-${pythonVersion}-${packageManager}-v2-${fileHash}`
+              );
+            } else {
+              expect(infoSpy).toHaveBeenCalledWith(
+                `Cache restored from key: setup-python-${process.env['RUNNER_OS']}-${process.arch}-python-${pythonVersion}-${packageManager}-${fileHash}`
+              );
+            }
+          } else {
+            expect(infoSpy).toHaveBeenCalledWith(
+              `${packageManager} cache is not found`
+            );
+          }
+        });
       },
       30000
     );
 
-    it.each([
-      ['pip', '3.8.12', 'requirements-linux.txt', 'requirements-linux.txt'],
-      ['pip', '3.8.12', 'requirements.txt', 'requirements.txt'],
-      ['pipenv', '3.9.12', 'requirements.txt', 'requirements.txt']
-    ])(
+    it.each([['pipenv', '3.9.12', 'requirements.txt', 'requirements.txt']])(
       'Should throw an error because dependency file is not found',
       async (
         packageManager,
@@ -135,19 +226,58 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
           pythonVersion,
           dependencyFile
         );
-        await expect(cacheDistributor.restoreCache()).rejects.toThrowError(
+
+        await expect(cacheDistributor.restoreCache()).rejects.toThrow(
           `No file in ${process.cwd()} matched to [${cacheDependencyPath
             .split('\n')
             .join(',')}], make sure you have checked out the target repository`
         );
       }
     );
+
+    it.each([
+      ['pip', '3.8.12', 'requirements-linux.txt'],
+      ['pip', '3.8.12', 'requirements.txt']
+    ])(
+      'Shouldn`t throw an error as there is a default file `pyproject.toml` to use when requirements.txt is not specified',
+      async (packageManager, pythonVersion, dependencyFile) => {
+        const cacheDistributor = getCacheDistributor(
+          packageManager,
+          pythonVersion,
+          dependencyFile
+        );
+        await expect(cacheDistributor.restoreCache()).resolves.not.toThrow();
+      }
+    );
+
+    it.each([
+      ['pip', '3.8.12', 'requirements-linux.txt'],
+      ['pip', '3.8.12', 'requirements.txt']
+    ])(
+      'Should throw an error as there is no default file `pyproject.toml` to use when requirements.txt is not specified',
+      async (packageManager, pythonVersion, dependencyFile) => {
+        const cacheDistributor = getCacheDistributor(
+          packageManager,
+          pythonVersion,
+          dependencyFile
+        ) as any; // Widening PipCache | PipenvCache | PoetryCache type to any allow us to change private property on the cacheDistributor to test value: "**/pyprojecttest.toml"
+
+        cacheDistributor.cacheDependencyBackupPath = '**/pyprojecttest.toml';
+
+        await expect(cacheDistributor.restoreCache()).rejects.toThrow();
+      }
+    );
   });
 
   describe('Dependencies changed', () => {
     it.each([
-      ['pip', '3.8.12', undefined, pipFileLockHash],
-      ['pip', '3.8.12', '**/requirements-linux.txt', pipFileLockHash],
+      ['pip', '3.8.12', '__tests__/data/**/requirements.txt', pipFileLockHash],
+      [
+        'pip',
+        '3.8.12',
+        '__tests__/data/**/requirements-linux.txt',
+        pipFileLockHash
+      ],
       [
         'pip',
         '3.8.12',
@@ -155,9 +285,9 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
         pipFileLockHash
       ],
       ['pip', '3.8.12', '__tests__/data/requirements.txt', pipFileLockHash],
-      ['pipenv', '3.9.1', undefined, requirementsHash],
+      ['pipenv', '3.9.1', '__tests__/data/**/Pipfile.lock', requirementsHash],
       ['pipenv', '3.9.12', '__tests__/data/requirements.txt', requirementsHash],
-      ['poetry', '3.9.1', undefined, requirementsHash]
+      ['poetry', '3.9.1', '__tests__/data/**/poetry.lock', requirementsHash]
     ])(
       'restored dependencies for %s by primaryKey',
       async (packageManager, pythonVersion, dependencyFile, fileHash) => {

@@ -1,14 +1,25 @@
 import * as core from '@actions/core';
 import * as finder from './find-python';
 import * as finderPyPy from './find-pypy';
+import * as finderGraalPy from './find-graalpy';
 import * as path from 'path';
 import * as os from 'os';
 import fs from 'fs';
 import {getCacheDistributor} from './cache-distributions/cache-factory';
-import {isCacheFeatureAvailable} from './utils';
+import {
+  isCacheFeatureAvailable,
+  logWarning,
+  IS_MAC,
+  getVersionInputFromFile,
+  getVersionInputFromPlainFile
+} from './utils';
 
 function isPyPyVersion(versionSpec: string) {
   return versionSpec.startsWith('pypy');
+}
+
+function isGraalPyVersion(versionSpec: string) {
+  return versionSpec.startsWith('graalpy');
 }
 
 async function cacheDependencies(cache: string, pythonVersion: string) {
@@ -22,63 +33,112 @@ async function cacheDependencies(cache: string, pythonVersion: string) {
   await cacheDistributor.restoreCache();
 }
 
-function resolveVersionInput(): string {
-  let version = core.getInput('python-version');
+function resolveVersionInputFromDefaultFile(): string[] {
+  const couples: [string, (versionFile: string) => string[]][] = [
+    ['.python-version', getVersionInputFromPlainFile]
+  ];
+  for (const [versionFile, _fn] of couples) {
+    logWarning(
+      `Neither 'python-version' nor 'python-version-file' inputs were supplied. Attempting to find '${versionFile}' file.`
+    );
+    if (fs.existsSync(versionFile)) {
+      return _fn(versionFile);
+    } else {
+      logWarning(`${versionFile} doesn't exist.`);
+    }
+  }
+  return [];
+}
+
+function resolveVersionInput() {
+  let versions = core.getMultilineInput('python-version');
   const versionFile = core.getInput('python-version-file');
 
-  if (version && versionFile) {
-    core.warning(
-      'Both python-version and python-version-file inputs are specified, only python-version will be used'
-    );
+  if (versions.length) {
+    if (versionFile) {
+      core.warning(
+        'Both python-version and python-version-file inputs are specified, only python-version will be used.'
+      );
+    }
+  } else {
+    if (versionFile) {
+      if (!fs.existsSync(versionFile)) {
+        throw new Error(
+          `The specified python version file at: ${versionFile} doesn't exist.`
+        );
+      }
+      versions = getVersionInputFromFile(versionFile);
+    } else {
+      versions = resolveVersionInputFromDefaultFile();
+    }
   }
 
-  if (version) {
-    return version;
-  }
-
-  const versionFilePath = path.join(
-    process.env.GITHUB_WORKSPACE!,
-    versionFile || '.python-version'
-  );
-  if (!fs.existsSync(versionFilePath)) {
-    throw new Error(
-      `The specified python version file at: ${versionFilePath} does not exist`
-    );
-  }
-  version = fs.readFileSync(versionFilePath, 'utf8');
-  core.info(`Resolved ${versionFile} as ${version}`);
-
-  return version;
+  return versions;
 }
 
 async function run() {
-  if (process.env.AGENT_TOOLSDIRECTORY?.trim()) {
-    core.debug(
-      `Python is expected to be installed into AGENT_TOOLSDIRECTORY=${process.env['AGENT_TOOLSDIRECTORY']}`
-    );
-    process.env['RUNNER_TOOL_CACHE'] = process.env['AGENT_TOOLSDIRECTORY'];
-  } else {
-    core.debug(
-      `Python is expected to be installed into RUNNER_TOOL_CACHE==${process.env['RUNNER_TOOL_CACHE']}`
-    );
+  if (IS_MAC) {
+    process.env['AGENT_TOOLSDIRECTORY'] = '/Users/runner/hostedtoolcache';
   }
-  try {
-    const version = resolveVersionInput();
-    if (version) {
-      let pythonVersion: string;
-      const arch: string = core.getInput('architecture') || os.arch();
-      if (isPyPyVersion(version)) {
-        const installed = await finderPyPy.findPyPyVersion(version, arch);
-        pythonVersion = `${installed.resolvedPyPyVersion}-${installed.resolvedPythonVersion}`;
-        core.info(
-          `Successfully set up PyPy ${installed.resolvedPyPyVersion} with Python (${installed.resolvedPythonVersion})`
-        );
-      } else {
-        const installed = await finder.useCpythonVersion(version, arch);
-        pythonVersion = installed.version;
-        core.info(`Successfully set up ${installed.impl} (${pythonVersion})`);
-      }
 
+  if (process.env.AGENT_TOOLSDIRECTORY?.trim()) {
+    process.env['RUNNER_TOOL_CACHE'] = process.env['AGENT_TOOLSDIRECTORY'];
+  }
+
+  core.debug(
+    `Python is expected to be installed into ${process.env['RUNNER_TOOL_CACHE']}`
+  );
+  try {
+    const versions = resolveVersionInput();
+    const checkLatest = core.getBooleanInput('check-latest');
+    const allowPreReleases = core.getBooleanInput('allow-prereleases');
+
+    if (versions.length) {
+      let pythonVersion = '';
+      const arch: string = core.getInput('architecture') || os.arch();
+      const updateEnvironment = core.getBooleanInput('update-environment');
+      core.startGroup('Installed versions');
+      for (const version of versions) {
+        if (isPyPyVersion(version)) {
+          const installed = await finderPyPy.findPyPyVersion(
+            version,
+            arch,
+            updateEnvironment,
+            checkLatest,
+            allowPreReleases
+          );
+          pythonVersion = `${installed.resolvedPyPyVersion}-${installed.resolvedPythonVersion}`;
+          core.info(
+            `Successfully set up PyPy ${installed.resolvedPyPyVersion} with Python (${installed.resolvedPythonVersion})`
+          );
+        } else if (isGraalPyVersion(version)) {
+          const installed = await finderGraalPy.findGraalPyVersion(
+            version,
+            arch,
+            updateEnvironment,
+            checkLatest,
+            allowPreReleases
+          );
+          pythonVersion = `${installed}`;
+          core.info(`Successfully set up GraalPy ${installed}`);
+        } else {
+          if (version.startsWith('2')) {
+            core.warning(
+              'The support for python 2.7 was removed on June 19, 2023. Related issue: https://github.com/actions/setup-python/issues/672'
+            );
+          }
+          const installed = await finder.useCpythonVersion(
+            version,
+            arch,
+            updateEnvironment,
+            checkLatest,
+            allowPreReleases
+          );
+          pythonVersion = installed.version;
+          core.info(`Successfully set up ${installed.impl} (${pythonVersion})`);
+        }
+      }
+      core.endGroup();
       const cache = core.getInput('cache');
       if (cache && isCacheFeatureAvailable()) {
         await cacheDependencies(cache, pythonVersion);

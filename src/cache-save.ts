@@ -4,11 +4,18 @@ import * as cache from '@actions/cache';
 import fs from 'fs';
 import {State} from './cache-distributions/cache-distributor';
 
-export async function run() {
+// Added early exit to resolve issue with slow post action step:
+// - https://github.com/actions/setup-node/issues/878
+// https://github.com/actions/cache/pull/1217
+export async function run(earlyExit?: boolean) {
   try {
     const cache = core.getInput('cache');
     if (cache) {
       await saveCache(cache);
+
+      if (earlyExit) {
+        process.exit(0);
+      }
     }
   } catch (error) {
     const err = error as Error;
@@ -17,7 +24,16 @@ export async function run() {
 }
 
 async function saveCache(packageManager: string) {
-  const cachePaths = JSON.parse(core.getState(State.CACHE_PATHS)) as string[];
+  const cachePathState = core.getState(State.CACHE_PATHS);
+
+  if (!cachePathState) {
+    core.warning(
+      'Cache paths are empty. Please check the previous logs and make sure that the python version is specified'
+    );
+    return;
+  }
+
+  const cachePaths = JSON.parse(cachePathState) as string[];
 
   core.debug(`paths for caching are ${cachePaths.join(', ')}`);
 
@@ -25,7 +41,7 @@ async function saveCache(packageManager: string) {
     throw new Error(
       `Cache folder path is retrieved for ${packageManager} but doesn't exist on disk: ${cachePaths.join(
         ', '
-      )}`
+      )}. This likely indicates that there are no dependencies to cache. Consider removing the cache step if it is not needed.`
     );
   }
 
@@ -43,17 +59,20 @@ async function saveCache(packageManager: string) {
     return;
   }
 
+  let cacheId = 0;
+
   try {
-    await cache.saveCache(cachePaths, primaryKey);
-    core.info(`Cache saved with the key: ${primaryKey}`);
-  } catch (error) {
-    const err = error as Error;
-    if (err.name === cache.ReserveCacheError.name) {
-      core.info(err.message);
-    } else {
-      throw error;
-    }
+    cacheId = await cache.saveCache(cachePaths, primaryKey);
+  } catch (err) {
+    const message = (err as Error).message;
+    core.info(`[warning]${message}`);
+    return;
   }
+
+  if (cacheId == -1) {
+    return;
+  }
+  core.info(`Cache saved with the key: ${primaryKey}`);
 }
 
 function isCacheDirectoryExists(cacheDirectory: string[]) {
@@ -64,4 +83,4 @@ function isCacheDirectoryExists(cacheDirectory: string[]) {
   return result;
 }
 
-run();
+run(true);
