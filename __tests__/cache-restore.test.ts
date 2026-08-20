@@ -276,7 +276,9 @@ virtualenvs.path = "{cache-dir}/virtualenvs"  # /Users/patrick/Library/Caches/py
         await expect(cacheDistributor.restoreCache()).rejects.toThrow(
           `No file in ${process.cwd()} matched to [${cacheDependencyPath
             .split('\n')
-            .join(',')}], make sure you have checked out the target repository`
+            .join(
+              ','
+            )}] for ${packageManager}. Make sure you have checked out the target repository, or consider removing the cache step if there are no dependencies to cache.`
         );
       }
     );

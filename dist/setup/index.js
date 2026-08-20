@@ -103351,7 +103351,7 @@ class CacheDistributor {
                     .split('\n')
                     .join(',')} or ${CACHE_DEPENDENCY_BACKUP_PATH}`
                 : this.cacheDependencyPath.split('\n').join(',');
-            throw new Error(`No file in ${process.cwd()} matched to [${file}], make sure you have checked out the target repository`);
+            throw new Error(`No file in ${process.cwd()} matched to [${file}] for ${this.packageManager}. Make sure you have checked out the target repository, or consider removing the cache step if there are no dependencies to cache.`);
         }
         const cachePath = await this.getCacheGlobalDirectories();
         saveState(State.CACHE_PATHS, cachePath);
