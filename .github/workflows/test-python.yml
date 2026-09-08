@@ -61,6 +61,32 @@ jobs:
       - name: Run simple code
         run: python -c 'import math; print(math.factorial(5))'
 
+  setup-versions-via-mirror-input:
+    name: 'Setup via explicit mirror input: ${{ matrix.os }}'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The refs/heads/ form serves the same manifest as the default mirror and
+      # exercises the refs/heads/{branch} -> {branch} parsing on the API path.
+      # check-latest forces a manifest fetch even though 3.12 is preinstalled,
+      # so the job actually contacts the mirror instead of short-circuiting on
+      # the tool cache.
+      - name: setup-python with explicit mirror
+        uses: ./
+        with:
+          python-version: 3.12
+          check-latest: true
+          mirror: https://raw.githubusercontent.com/actions/python-versions/refs/heads/main
+
+      - name: Run simple code
+        run: python -c 'import sys; print(sys.version)'
+
   setup-versions-from-file:
     name: Setup ${{ matrix.python }} ${{ matrix.os }} version file
     runs-on: ${{ matrix.os }}

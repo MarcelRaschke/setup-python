@@ -2,6 +2,7 @@ import * as core from '@actions/core';
 import * as finder from './find-python.js';
 import * as finderPyPy from './find-pypy.js';
 import * as finderGraalPy from './find-graalpy.js';
+import {isMirrorCustomized} from './install-python.js';
 import * as path from 'path';
 import * as os from 'os';
 import {fileURLToPath} from 'url';
@@ -21,6 +22,21 @@ function isPyPyVersion(versionSpec: string) {
 
 function isGraalPyVersion(versionSpec: string) {
   return versionSpec.startsWith('graalpy');
+}
+
+// `mirror` only redirects CPython distributions. PyPy and GraalPy resolve from
+// downloads.python.org and the GitHub releases API respectively, so warn rather
+// than let the input look like it applied. Only warns when the user actually
+// set a custom mirror: action.yml gives `mirror` a default, so a plain
+// getInput() check would fire on every pypy-*/graalpy-* run.
+function warnIfMirrorUnsupported(versionSpec: string) {
+  if (!isMirrorCustomized()) {
+    return;
+  }
+  const implementation = isPyPyVersion(versionSpec) ? 'PyPy' : 'GraalPy';
+  core.warning(
+    `The 'mirror' input only applies to CPython distributions and is ignored for ${implementation} ('${versionSpec}'), which is downloaded from its own upstream source.`
+  );
 }
 
 async function cacheDependencies(cache: string, pythonVersion: string) {
@@ -102,6 +118,7 @@ async function run() {
       core.startGroup('Installed versions');
       for (const version of versions) {
         if (isPyPyVersion(version)) {
+          warnIfMirrorUnsupported(version);
           const installed = await finderPyPy.findPyPyVersion(
             version,
             arch,
@@ -114,6 +131,7 @@ async function run() {
             `Successfully set up PyPy ${installed.resolvedPyPyVersion} with Python (${installed.resolvedPythonVersion})`
           );
         } else if (isGraalPyVersion(version)) {
+          warnIfMirrorUnsupported(version);
           const installed = await finderGraalPy.findGraalPyVersion(
             version,
             arch,
